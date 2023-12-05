@@ -1,0 +1,862 @@
+import logging
+import ask_sdk_core.utils as ask_utils
+
+from ask_sdk_core.skill_builder import SkillBuilder
+from ask_sdk_core.dispatch_components import AbstractRequestHandler
+from ask_sdk_core.dispatch_components import AbstractExceptionHandler
+from ask_sdk_core.handler_input import HandlerInput
+
+from ask_sdk_model import Response
+from oauth2client.service_account import ServiceAccountCredentials #uses gspread
+from googleapiclient.discovery import build
+from datetime import datetime,timedelta
+from dateutil import parser
+import boto3
+import pytz
+import json
+
+
+from oauth2client.service_account import ServiceAccountCredentials
+from googleapiclient.discovery import build
+
+scope = ["https://www.googleapis.com/auth/calendar"]
+
+creds = ServiceAccountCredentials.from_json_keyfile_name("creds.json", scope)
+API_NAME = 'calendar'
+API_VERSION = 'v3'
+# google calendar service
+service = build(API_NAME, API_VERSION, credentials=creds)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+
+class LaunchRequestHandler(AbstractRequestHandler):
+    """Handler for Skill Launch."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+
+        return ask_utils.is_request_type("LaunchRequest")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        speak_output = "Welcome to XYZ hospital. Do you want to login or register?"
+
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .ask(speak_output)
+                .response
+        )
+
+
+
+class RegisterIntentHandler(AbstractRequestHandler):
+    """Handler for Register Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("RegisterIntent")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        name = slots["Name"].value
+        age = slots["Age"].value
+        DOB = str(slots["DOB"].value)
+        gender = str(slots["gender"].resolutions.resolutions_per_authority[0].values[0].value.name)
+        email = str(slots["email"].value)
+        attributes_manager = handler_input.attributes_manager
+        session_attributes = attributes_manager.session_attributes
+        
+        conv_email = convert_email(email)
+        session_attributes['conv_email'] = conv_email
+        
+        
+        if(check_email_existence(conv_email)):
+            id = int(generate_id())
+            store_user_info(id, name, age, DOB, gender, conv_email)
+            speak_output = f"You are registered. {id} is your account id. Remember this id to login later.To login, say 'login'"
+            return (
+            handler_input.response_builder
+                .speak(speak_output)
+                #.ask("To login, say 'login'")
+                .set_should_end_session(False)
+                .response
+            )
+        else:
+            verify_email_address(conv_email)
+            speak_output = f"We have sent you a verification email, do click on the link provided to verify your email.If you recieved a verification email and clicked on the link, plese say 'verified' else say 'not verified'."
+            return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .set_should_end_session(False)
+                .response
+        )
+        
+
+        
+        
+
+
+class VerificationIntentHandler(AbstractRequestHandler):
+    """Handler for Verification Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("VerificationIntent")(handler_input)
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        verifyOrNo = str(slots["verify_slot"].resolutions.resolutions_per_authority[0].values[0].value.name)
+        attributes_manager = handler_input.attributes_manager
+        session_attributes = attributes_manager.session_attributes
+        conv_email = session_attributes.get('conv_email')
+
+        if(verifyOrNo == 'yes'):
+            if(check_email_existence(conv_email)):
+                id = str(generate_id())
+                store_user_info(id, name, age, DOB, gender, conv_email)
+                speak_output = f"You are registered. {id} is your account id. Remember this id to login later.To login, say 'login'"
+                return (
+                    handler_input.response_builder
+                        .speak(speak_output)
+                        .set_should_end_session(False)
+                        .response
+                )
+            
+        elif(verifyOrNo == 'no'):
+            speak_output = f"Email you entered is incorrect or not verified. Register again with correct email id.To register again say 'register'"
+            return (
+                handler_input.response_builder
+                    .speak(speak_output)
+                    .set_should_end_session(False)
+                    .response
+            )
+        
+        
+
+class LoginIntentHandler(AbstractRequestHandler):
+    """Handler for Login Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("LoginIntent")(handler_input)        
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        id = int(slots["id"].value)
+        email = str(slots["email"].value)
+       
+        attributes_manager = handler_input.attributes_manager
+        session_attributes = attributes_manager.session_attributes
+        session_attributes['id'] = id
+        session_attributes['email'] = email
+        attributes_manager.session_attributes = session_attributes
+        log_conv_email=convert_email(email)
+        session_attributes['log_conv_email'] = log_conv_email
+        
+        if(check_id_and_email_in_dynamodb(id, log_conv_email)):
+            speak_output = f"Login Successful. If you want to schedule an appointment say 'schedule'."
+            return (
+                handler_input.response_builder
+                    .speak(speak_output)
+                    .set_should_end_session(False)
+                    .response
+            )
+        else:
+            speak_output = f"Login unsuccessful. Invalid details"
+            return (
+                handler_input.response_builder
+                    .speak(speak_output)
+                    .set_should_end_session(False)
+                    .response
+            )
+
+class ForgotIDIntentHandler(AbstractRequestHandler):
+    """Handler for Forgot ID Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("ForgotIDIntent")(handler_input)        
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        email = str(slots["email"].value)
+        name = str(slots["name"].value)
+        conv_email = convert_email(email)
+        ID = get_user_ids_by_email_and_name(conv_email,name)
+        speak_output = f"{ID} is your unique_id. To login say login"
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .response
+        )
+        
+        
+
+
+class ScheduleIntentHandler(AbstractRequestHandler):
+    """Handler for Schedule Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("ScheduleIntent")(handler_input)        
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        date = str(slots["date"].value)
+        time = str(slots["time"].value)
+        department = str(slots["department"].value)
+        doctorsList = get_doctors(department)
+        handler_input.attributes_manager.session_attributes["date"] = date
+        handler_input.attributes_manager.session_attributes["doctorsList"] = doctorsList
+        handler_input.attributes_manager.session_attributes["time"] = time
+        handler_input.attributes_manager.session_attributes["department"] = department
+        seperator = ', '
+        doctorsString = seperator.join(doctorsList)
+        
+        
+        speak_output = f"Doctors available in the {department} department are {doctorsString}. Choose a doctor to schedule an appointment."
+        
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .response
+        )
+        
+class BookDoctorIntentHandler(AbstractRequestHandler):
+    """Handler for Book Doctor Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("BookDoctorIntent")(handler_input)        
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        attributes_manager = handler_input.attributes_manager
+        session_attributes = attributes_manager.session_attributes
+        doc_name = (str(slots["doc_name"].value)).lower()
+        session_attributes['doc'] = doc_name
+        calendar_id = get_calendarID(doc_name)
+        session_attributes['calendar_id'] = calendar_id
+        session_attributes['doc_name'] = doc_name
+        
+        
+        date = session_attributes.get('date')
+        time = session_attributes.get('time')
+        department = session_attributes.get('department')
+        log_conv_email = session_attributes.get('log_conv_email')
+        id = session_attributes.get('id')
+        doc_name = session_attributes.get('doc_name')
+        
+        dateSlot = datetime.datetime.strptime(date, "%Y-%m-%d")
+        hour = int(time.split(":")[0])
+        mins = int(time.split(":")[1])
+        time_min = datetime.datetime(dateSlot.year, dateSlot.month, dateSlot.day, hour, mins)
+        session_attributes['time_min'] = time_min
+        time_max = time_min + timedelta(hours=1)
+        session_attributes['time_max'] = time_max
+        
+        if check_free_busy(time_min, time_max, calendar_id):
+            reserve_appointment(time_min, time_max, calendar_id)
+            subject = f"{department} appointment confirmation."
+            name = get_name_by_unique_id(str(id))
+            body = f"Dear {name}, your appointment with {department}: {doc_name} on {date} at {time} is successfully scheduled. Thank you."
+            send_email(log_conv_email, subject, body)
+            speak_output = f"Your appointment on {date} at {time} with {department} : {doc_name} is successfully scheduled."
+            return (
+                handler_input.response_builder
+                    .speak(speak_output)
+                    .set_should_end_session(True)
+                    .response
+            )
+        else :
+            free_slot = find_next_free_slot(time_min,calendar_id)
+            if free_slot:
+                #reserve_appointment(free_slot["start"], free_slot["end"])
+                nfs_date = extract_date(free_slot['start'])
+                session_attributes['nfs_date'] = nfs_date
+                
+                nfs_start = extract_time(free_slot['start'])
+                session_attributes['nfs_start'] = nfs_start
+
+                nfs_end = extract_time(free_slot['end'])
+                session_attributes['nfs_end'] = nfs_end
+                
+                speak_output = f"Doctor: {doc_name} is not available at the respective time. The next available free slot with doctor is {nfs_start} to {nfs_end}. If you want to reserve it say 'yes' or if you want to know other doctors available at that time say 'others' else say 'no'."
+                return (
+                    handler_input.response_builder
+                        .speak(speak_output)
+                        .set_should_end_session(False)
+                        .response
+                )
+                
+
+class NextSlotIntentHandler(AbstractRequestHandler):
+    """Handler for Next Slot Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("NextSlotIntent")(handler_input)        
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        slots = handler_input.request_envelope.request.intent.slots
+        attributes_manager = handler_input.attributes_manager
+        session_attributes = attributes_manager.session_attributes
+        
+        calendar_id = session_attributes.get('calendar_id')
+        id = session_attributes.get('id')
+        date = session_attributes.get('date')
+        time = session_attributes.get('time')
+        department = session_attributes.get('department')
+        log_conv_email = session_attributes.get('log_conv_email')
+        doc_name = session_attributes.get('doc_name')
+        
+        yesOrNo = str(slots["yesOrNo"].value)
+        
+        if yesOrNo == 'yes':
+            nfs_date = session_attributes.get('nfs_date')
+            nfs_start = session_attributes.get('nfs_start')
+            nfs_end = session_attributes.get('nfs_end')
+            nfs_start_hour = int(nfs_start.split(":")[0])
+            nfs_start_mins = int(nfs_start.split(":")[1])
+            nfs_end_hour = int(nfs_end.split(":")[0])
+            nfs_end_mins = int(nfs_end.split(":")[1])
+            
+            dateSlot = datetime.datetime.strptime(nfs_date, "%Y-%m-%d")
+            nfs_start_1 = datetime.datetime(dateSlot.year, dateSlot.month, dateSlot.day, nfs_start_hour, nfs_start_mins)
+            nfs_end_1 = datetime.datetime(dateSlot.year, dateSlot.month, dateSlot.day, nfs_end_hour, nfs_end_mins)
+            
+            reserve_appointment(nfs_start_1,nfs_end_1,calendar_id)
+            subject = f"{department} appointment confirmation."
+            name = get_name_by_unique_id(str(id))
+            body = f"Dear {name}, your appointment with {department}: {doc_name} on {date} at {time} is successfully scheduled. Thank you."
+            send_email(log_conv_email, subject, body)
+            speak_output = f"Your appointment on {date} at {nfs_start} with {department} : {doc_name} is successfully scheduled."
+            return (
+                handler_input.response_builder
+                    .speak(speak_output)
+                    .set_should_end_session(True)
+                    .response
+            )
+        elif yesOrNo == 'No':
+            speak_output = f"Okay."
+            return (
+                handler_input.response_builder
+                    .speak(speak_output)
+                    .set_should_end_session(True)
+                    .response
+            )
+        elif yesOrNo == 'others':
+            l = []
+            doctorsList = session_attributes.get('doctorsList')
+            time_min = session_attributes.get('time_min')
+            time_min = datetime.datetime.strptime(time_min, "%Y-%m-%dT%H:%M:%S")
+            time_max = session_attributes.get('time_max')
+            time_max = datetime.datetime.strptime(time_max, "%Y-%m-%dT%H:%M:%S")
+            for doctor in doctorsList:
+                calendar_id = get_calendarID(doctor)
+                if (check_free_busy(time_min,time_max,calendar_id)):
+                    l.append(doctor)
+            
+            if len(l)==0:
+                speak_output = f"Sorry, there are no doctors available at the given time."
+                return (
+                    handler_input.response_builder
+                        .speak(speak_output)
+                        .set_should_end_session(True)
+                        .response
+                )
+            else:
+                seperator = ', '
+                doctorsString = seperator.join(l)
+                department = session_attributes.get('department')
+                speak_output = f"The available doctors in {department} are {doctorsString}. Choose a doctor for appointment."
+                return (
+                    handler_input.response_builder
+                        .speak(speak_output)
+                        .set_should_end_session(False)
+                        .response
+                )
+                
+            
+                
+            
+        
+
+class HelpIntentHandler(AbstractRequestHandler):
+    """Handler for Help Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("AMAZON.HelpIntent")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        speak_output = "You can say hello to me! How can I help?"
+
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .ask(speak_output)
+                .response
+        )
+
+
+class CancelOrStopIntentHandler(AbstractRequestHandler):
+    """Single handler for Cancel and Stop Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return (ask_utils.is_intent_name("AMAZON.CancelIntent")(handler_input) or
+                ask_utils.is_intent_name("AMAZON.StopIntent")(handler_input))
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        speak_output = "Goodbye!"
+
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .response
+        )
+
+class FallbackIntentHandler(AbstractRequestHandler):
+    """Single handler for Fallback Intent."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_intent_name("AMAZON.FallbackIntent")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        logger.info("In FallbackIntentHandler")
+        speech = "Hmm, I'm not sure. You can say Hello or Help. What would you like to do?"
+        reprompt = "I didn't catch that. What can I help you with?"
+
+        return handler_input.response_builder.speak(speech).ask(reprompt).response
+
+class SessionEndedRequestHandler(AbstractRequestHandler):
+    """Handler for Session End."""
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_request_type("SessionEndedRequest")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+
+        # Any cleanup logic goes here.
+
+        return handler_input.response_builder.response
+
+
+class IntentReflectorHandler(AbstractRequestHandler):
+    """The intent reflector is used for interaction model testing and debugging.
+    It will simply repeat the intent the user said. You can create custom handlers
+    for your intents by defining them above, then also adding them to the request
+    handler chain below.
+    """
+    def can_handle(self, handler_input):
+        # type: (HandlerInput) -> bool
+        return ask_utils.is_request_type("IntentRequest")(handler_input)
+
+    def handle(self, handler_input):
+        # type: (HandlerInput) -> Response
+        intent_name = ask_utils.get_intent_name(handler_input)
+        speak_output = "You just triggered " + intent_name + "."
+
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                # .ask("add a reprompt if you want to keep the session open for the user to respond")
+                .response
+        )
+
+
+class CatchAllExceptionHandler(AbstractExceptionHandler):
+    """Generic error handling to capture any syntax or routing errors. If you receive an error
+    stating the request handler chain is not found, you have not implemented a handler for
+    the intent being invoked or included it in the skill builder below.
+    """
+    def can_handle(self, handler_input, exception):
+        # type: (HandlerInput, Exception) -> bool
+        return True
+
+    def handle(self, handler_input, exception):
+        # type: (HandlerInput, Exception) -> Response
+        logger.error(exception, exc_info=True)
+
+        speak_output = "Sorry, I had trouble doing what you asked. Please try again."
+
+        return (
+            handler_input.response_builder
+                .speak(speak_output)
+                .ask(speak_output)
+                .response
+        )
+
+# The SkillBuilder object acts as the entry point for your skill, routing all request and response
+# payloads to the handlers above. Make sure any new handlers or interceptors you've
+# defined are included below. The order matters - they're processed top to bottom.
+
+
+sb = SkillBuilder()
+
+sb.add_request_handler(LaunchRequestHandler())
+sb.add_request_handler(RegisterIntentHandler())
+sb.add_request_handler(VerificationIntentHandler())
+sb.add_request_handler(LoginIntentHandler())
+sb.add_request_handler(ForgotIDIntentHandler())
+sb.add_request_handler(ScheduleIntentHandler())
+sb.add_request_handler(BookDoctorIntentHandler())
+sb.add_request_handler(NextSlotIntentHandler())
+sb.add_request_handler(HelpIntentHandler())
+sb.add_request_handler(CancelOrStopIntentHandler())
+sb.add_request_handler(FallbackIntentHandler())
+sb.add_request_handler(SessionEndedRequestHandler())
+sb.add_request_handler(IntentReflectorHandler()) # make sure IntentReflectorHandler is last so it doesn't override your custom intent handlers
+
+sb.add_exception_handler(CatchAllExceptionHandler())
+
+lambda_handler = sb.lambda_handler()
+
+def convert_email(email):
+    converted_email = email.replace(" dot ", ".").replace(" at ", "@").replace(" ", "").replace(",","").lower()
+    return converted_email
+
+
+client = boto3.client('dynamodb')
+
+def store_user_info(id, name, age, DOB, gender, conv_email):
+    # Put item (store user information) in the table
+    response = client.put_item(
+        TableName='patient_info',
+        Item={
+            'unique_id': {'N': str(id)},
+            'email': {'S': conv_email},
+            'Name': {'S': name},
+            'Age': {'N': age},
+            'DOB': {'S': DOB},
+            'gender': {'S': gender}
+        }
+    )
+
+def check_email_existence(email_address):
+    ses_client = boto3.client('ses')
+
+    # Retrieve the set of verified SES email addresses
+    response = ses_client.list_identities(IdentityType='EmailAddress')
+    verified_email_addresses = response['Identities']
+
+    # Check if the email address is present in the set of verified addresses
+    if email_address in verified_email_addresses:
+        return True
+    else:
+        return False
+
+
+import time
+
+def verify_email_address(email_address):
+    ses_client = boto3.client('ses')
+    response = ses_client.verify_email_identity(EmailAddress=email_address)
+    
+    
+    if 'VerificationToken' in response:
+        verification_token = response['VerificationToken']
+        # Send the verification token to the user via email or another method
+        # and wait for the user to click on the verification link
+        
+        # Check if the user has clicked on the verification link
+        verification_status = ses_client.get_identity_verification_attributes(Identities=[email_address])
+        email_attributes = verification_status['VerificationAttributes'].get(email_address, {})
+        email_verification_status = email_attributes.get('VerificationStatus', 'NotStarted')
+        
+        if email_verification_status == 'Success':
+            return True
+        elif email_verification_status == 'Pending':
+            return False  # The verification is still pending
+        else:
+            return False  # The verification failed or was not started
+        
+    else:
+        return False  # The verification request failed
+
+
+
+def generate_id():
+    counter= get_max_column_value() + 1;
+    id_str = int(str(counter).zfill(3))  # Pad the ID with leading zeros
+    return id_str
+    
+def get_max_column_value():
+    dynamodb = boto3.client('dynamodb')
+
+    response = dynamodb.scan(
+        TableName='patient_info',
+        ProjectionExpression='unique_id'
+    )
+
+    max_value = None
+    for item in response['Items']:
+        column_value = item.get('unique_id', {}).get('N')  # Assuming the column is of type Number
+        if column_value is not None:
+            value = int(column_value)
+            if max_value is None or value > max_value:
+                max_value = value
+
+    return max_value
+
+def check_id_and_email_in_dynamodb(id_value, email_value):
+    dynamodb = boto3.client('dynamodb')
+    table_name = 'patient_info'  # Replace with your actual table name
+
+    # Create the Key for the get_item() request
+    key = {
+        'unique_id': {'N': str(id_value)},
+        'email': {'S': email_value}
+    }
+
+    try:
+        response = dynamodb.get_item(
+            TableName=table_name,
+            Key=key
+        )
+        item = response.get('Item')
+
+        if item is not None:
+            # The ID and email are present in the table
+            return True
+        else:
+            # The ID and email are not present in the table
+            return False
+
+    except Exception as e:
+        print('Error:', e)
+        # Handle the exception as per your requirement
+        return False
+        
+def get_doctors(department):
+    dynamodb = boto3.client('dynamodb')
+    # Perform a query or scan operation
+    response = dynamodb.scan(
+        TableName='Doctor_info',
+        FilterExpression='department = :dep',
+        ExpressionAttributeValues={':dep': {'S': department}}
+    )
+
+    names = [item['doctorName']['S'] for item in response['Items']]
+
+    return names
+
+
+def get_calendarID(doctName):
+    # Initialize the DynamoDB client
+    dynamodb = boto3.client('dynamodb')
+    
+    response = dynamodb.scan(
+        TableName='Doctor_info',
+        FilterExpression='doctorName = :name',
+        ExpressionAttributeValues={
+            ':name': {'S': doctName}
+        }
+    )
+    # Check if a matching record was found
+    if response['Count'] > 0:
+        item = response['Items'][0]
+        calendar_id = item['calendarID']['S']
+        return calendar_id
+    
+    return None
+
+
+def reserve_appointment(time_min, time_max,calendarid):
+    # Specify the time zone as IST
+    timezone = pytz.timezone('Asia/Kolkata')
+
+    # Convert the start and end times to IST
+    time_min_ist = time_min.astimezone(timezone)
+    calendar_id = calendarid
+    
+   
+    time_max_ist = time_max.astimezone(timezone)
+
+    event = {
+        'summary': 'appointment',
+        'description': "description test",
+        'start': {
+            'dateTime': time_min_ist.strftime("%Y-%m-%dT%H:%M:%S"),
+            'timeZone': 'Asia/Kolkata',
+        },
+        'end': {
+            'dateTime': time_max_ist.strftime("%Y-%m-%dT%H:%M:%S"),
+            'timeZone': 'Asia/Kolkata',
+        },
+        'reminders': {
+            'useDefault': False,
+            'overrides': [
+                {'method': 'popup', 'minutes': 30},
+            ],
+        },
+    }
+
+    print(service.events().insert(calendarId=calendar_id, body=event).execute())
+
+
+def check_free_busy(time_min, time_max,calendarid):
+    try:
+        ist_timezone = pytz.timezone('Asia/Kolkata')
+        time_min_ist = time_min.astimezone(ist_timezone)
+        time_max_ist = time_max.astimezone(ist_timezone)
+        
+        calendar_id=calendarid
+
+        free_busy_query = {
+            'timeMin': time_min_ist.isoformat(),
+            'timeMax': time_max_ist.isoformat(),
+            'timeZone': 'Asia/Kolkata',
+            'items': [{'id': calendar_id}]
+        }
+        print(free_busy_query)
+        response =  service.freebusy().query(body=free_busy_query).execute()
+        calendars = response.get('calendars', {})
+        calendar = calendars.get(calendar_id, {})
+        busy_slots = calendar.get('busy', [])
+        return len(busy_slots) == 0
+    except Exception as e:
+        logging.error(f"Error querying free/busy: {str(e)}")
+        return False
+
+
+def can_schedule_appointment(time_min, time_max):
+    return check_free_busy(time_min, time_max)
+
+
+
+def schedule_appointment(time_min, time_max):
+    if can_schedule_appointment(time_min, time_max):
+        reserve_appointment(time_min, time_max)
+        return True
+    return False
+    
+import datetime
+    
+def find_next_free_slot(time_min,calendar_id):
+    ist_timezone = pytz.timezone('Asia/Kolkata')
+    time_max = time_min + timedelta(hours=1)
+    
+    while True:
+        time_min += datetime.timedelta(hours=1)
+        time_max += datetime.timedelta(hours=1)
+        is_slot_available = False
+        next_available_slot = None
+        
+        
+        if check_free_busy(time_min,time_max,calendar_id):
+            next_available_slot = {
+                'start': time_min.strftime("%Y-%m-%dT%H:%M:%S"),
+                'end': time_max.strftime("%Y-%m-%dT%H:%M:%S")
+            }
+            break;
+    return next_available_slot
+    
+def extract_time(timestamp):
+    datetime_obj = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
+    time_obj = datetime_obj.time()
+    return time_obj.strftime("%H:%M")
+    
+def extract_date(timestamp):
+    datetime_obj = datetime.datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S")
+    date_obj = datetime_obj.date()
+    return date_obj.strftime("%Y-%m-%d")
+
+
+def send_email(recipient_email, subject, body):
+    aws_region = 'eu-north-1'
+    
+    ses_client = boto3.client('ses', region_name=aws_region)
+    sender_email = "...@gmail.com" #Replace with your mail ID
+    
+    try:
+        # Send the email
+        response = ses_client.send_email(
+            Source=sender_email,
+            Destination={
+                'ToAddresses': [
+                    recipient_email,
+                ],
+            },
+            Message={
+                'Subject': {
+                    'Data': subject,
+                },
+                'Body': {
+                    'Text': {
+                        'Data': body,
+                    },
+                },
+            },
+        )
+        return response
+    except Exception as e:
+        # Handle any errors that occur during sending
+        print(f"Error sending email: {e}")
+        raise e
+
+def get_name_by_unique_id(unique_id_str):
+    # Convert the unique_id to an integer, if it's not already an integer
+    unique_id = int(unique_id_str)
+
+    # Initialize the DynamoDB client
+    dynamodb = boto3.client('dynamodb')
+
+    response = dynamodb.scan(
+        TableName='patient_info',  # Replace 'YourTableName' with the actual table name
+        FilterExpression='unique_id = :id',
+        ExpressionAttributeValues={
+            ':id': {'N': str(unique_id)}  # Convert the unique_id to a string and use it as 'N' type attribute value
+        }
+    )
+
+    # Check if a matching record was found
+    if response['Count'] > 0:
+        item = response['Items'][0]
+        name = item.get('Name', {}).get('S')
+        return name
+
+    return None
+
+
+def get_user_ids_by_email_and_name(email1, name1):
+    # Initialize the DynamoDB client
+    dynamodb = boto3.client('dynamodb')
+
+    # DynamoDB table name
+    table_name = 'patient_info'
+
+    # Define the FilterExpression for the scan
+    filter_expression = "#email_attr = :email_val AND #name_attr = :name_val"
+
+    # Define ExpressionAttributeValues for the placeholders in FilterExpression
+    expression_attribute_values = {
+        ":email_val": {'S': email1},
+        ":name_val": {'S': name1}
+    }
+    
+    # Define ExpressionAttributeNames to substitute reserved keywords
+    expression_attribute_names = {
+        "#email_attr": "email",
+        "#name_attr": "Name"
+    }
+
+    try:
+        # Perform the scan using the specified conditions
+        response = dynamodb.scan(
+            TableName=table_name,
+            FilterExpression=filter_expression,
+            ExpressionAttributeValues=expression_attribute_values,
+            ExpressionAttributeNames=expression_attribute_names
+        )
+
+        # Check if any items were returned
+        if 'Items' in response and len(response['Items']) > 0:
+            item = response['Items'][0]
+            unique_id = int(item['unique_id']['N'])  # Assuming unique_id is stored as a number
+            return unique_id
+        else:
+            return None  # No matching item found
+
+    except Exception as e:
+        print(f"Error retrieving unique_id: {e}")
+        return None
