@@ -47,7 +47,7 @@ This repository contains the code for an Alexa skill designed for XYZ Hospital. 
 
 ## Setup
 
-1. **Install Dependencies**: Install the required Python libraries using `pip install -r requirements.txt`.
+1. **Install Dependencies**: Install the required Python libraries.
 
 2. **Configuration**: Update the `creds.json` file with your Google Calendar API credentials.
 
